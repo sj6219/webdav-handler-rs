@@ -156,6 +156,7 @@ pub mod davpath;
 pub mod fakels;
 pub mod fs;
 pub mod localfs;
+pub mod localfsex;
 pub mod ls;
 pub mod memfs;
 pub mod memls;
