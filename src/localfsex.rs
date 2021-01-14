@@ -7,7 +7,8 @@
 use std::any::Any;
 use std::collections::VecDeque;
 use std::future::Future;
-use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+//use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(not(target_os = "windows"))]
 use { 
     std::os::unix::ffi::OsStrExt, 
@@ -88,7 +89,7 @@ struct LocalFsMetaData(std::fs::Metadata);
 
 /// Local Filesystem implementation.
 #[derive(Clone)]
-pub struct LocalFs {
+pub struct LocalFsEx {
     pub(crate) inner: Arc<LocalFsInner>,
 }
 
@@ -106,7 +107,7 @@ pub(crate) struct LocalFsInner {
 struct LocalFsFile(Option<std::fs::File>);
 
 struct LocalFsReadDir {
-    fs:        LocalFs,
+    fs:        LocalFsEx,
     do_meta:   ReadDirMeta,
     buffer:    VecDeque<io::Result<LocalFsDirEntry>>,
     dir_cache: Option<DUCacheBuilder>,
@@ -118,7 +119,7 @@ struct LocalFsReadDir {
 // to the filesystem so it can call fs.blocking()
 enum Meta {
     Data(io::Result<std::fs::Metadata>),
-    Fs(LocalFs),
+    Fs(LocalFsEx),
 }
 
 // Items from the readdir stream.
@@ -127,8 +128,8 @@ struct LocalFsDirEntry {
     entry: std::fs::DirEntry,
 }
 
-impl LocalFs {
-    /// Create a new LocalFs DavFileSystem, serving "base".
+impl LocalFsEx {
+    /// Create a new LocalFsEx DavFileSystem, serving "base".
     ///
     /// If "public" is set to true, all files and directories created will be
     /// publically readable (mode 644/755), otherwise they will be private
@@ -136,7 +137,7 @@ impl LocalFs {
     ///
     /// If "case_insensitive" is set to true, all filesystem lookups will
     /// be case insensitive. Note that this has a _lot_ of overhead!
-    pub fn new<P: AsRef<Path>>(base: P, public: bool, case_insensitive: bool, macos: bool) -> Box<LocalFs> {
+    pub fn new<P: AsRef<Path>>(base: P, public: bool, case_insensitive: bool, macos: bool) -> Box<LocalFsEx> {
         let inner = LocalFsInner {
             basedir:          base.as_ref().to_path_buf(),
             public:           public,
@@ -146,17 +147,17 @@ impl LocalFs {
             fs_access_guard:  None,
         };
         Box::new({
-            LocalFs {
+            LocalFsEx {
                 inner: Arc::new(inner),
             }
         })
     }
 
-    /// Create a new LocalFs DavFileSystem, serving "file".
+    /// Create a new LocalFsEx DavFileSystem, serving "file".
     ///
     /// This is like `new()`, but it always serves this single file.
     /// The request path is ignored.
-    pub fn new_file<P: AsRef<Path>>(file: P, public: bool) -> Box<LocalFs> {
+    pub fn new_file<P: AsRef<Path>>(file: P, public: bool) -> Box<LocalFsEx> {
         let inner = LocalFsInner {
             basedir:          file.as_ref().to_path_buf(),
             public:           public,
@@ -166,7 +167,7 @@ impl LocalFs {
             fs_access_guard:  None,
         };
         Box::new({
-            LocalFs {
+            LocalFsEx {
                 inner: Arc::new(inner),
             }
         })
@@ -180,7 +181,7 @@ impl LocalFs {
         case_insensitive: bool,
         macos: bool,
         fs_access_guard: Option<Box<dyn Fn() -> Box<dyn Any> + Send + Sync + 'static>>,
-    ) -> Box<LocalFs>
+    ) -> Box<LocalFsEx>
     {
         let inner = LocalFsInner {
             basedir:          base.as_ref().to_path_buf(),
@@ -191,7 +192,7 @@ impl LocalFs {
             fs_access_guard:  fs_access_guard,
         };
         Box::new({
-            LocalFs {
+            LocalFsEx {
                 inner: Arc::new(inner),
             }
         })
@@ -235,16 +236,17 @@ impl LocalFs {
 
 // This implementation is basically a bunch of boilerplate to
 // wrap the std::fs call in self.blocking() calls.
-impl DavFileSystem for LocalFs {
+impl DavFileSystem for LocalFsEx {
+
     fn metadata<'a>(&'a self, davpath: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
         async move {
-            if let Some(meta) = self.is_virtual(davpath) {
-                return Ok(meta);
-            }
+            // if let Some(meta) = self.is_virtual(davpath) {
+            //     return Ok(meta);
+            // }
             let path = self.fspath(davpath);
-            if self.is_notfound(&path) {
-                return Err(FsError::NotFound);
-            }
+            // if self.is_notfound(&path) {
+            //     return Err(FsError::NotFound);
+            // }
             self.blocking(move || {
                 match std::fs::metadata(path) {
                     Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
@@ -258,13 +260,13 @@ impl DavFileSystem for LocalFs {
 
     fn symlink_metadata<'a>(&'a self, davpath: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
         async move {
-            if let Some(meta) = self.is_virtual(davpath) {
-                return Ok(meta);
-            }
+            // if let Some(meta) = self.is_virtual(davpath) {
+            //     return Ok(meta);
+            // }
             let path = self.fspath(davpath);
-            if self.is_notfound(&path) {
-                return Err(FsError::NotFound);
-            }
+            // if self.is_notfound(&path) {
+            //     return Err(FsError::NotFound);
+            // }
             self.blocking(move || {
                 match std::fs::symlink_metadata(path) {
                     Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
@@ -295,7 +297,7 @@ impl DavFileSystem for LocalFs {
                         fs:        self.clone(),
                         do_meta:   meta,
                         buffer:    VecDeque::new(),
-                        dir_cache: self.dir_cache_builder(path2),
+                        dir_cache: None, // self.dir_cache_builder(path2),
                         iterator:  Some(iterator),
                         fut:       None,
                     };
@@ -310,9 +312,9 @@ impl DavFileSystem for LocalFs {
     fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<Box<dyn DavFile>> {
         async move {
             trace!("FS: open {:?}", self.fspath_dbg(path));
-            if self.is_forbidden(path) {
-                return Err(FsError::Forbidden);
-            }
+            // if self.is_forbidden(path) {
+            //     return Err(FsError::Forbidden);
+            // }
             #[cfg(not(target_os = "windows"))]
             let mode = if self.inner.public { 0o644 } else { 0o600 };
             let path = self.fspath(path);
@@ -350,9 +352,9 @@ impl DavFileSystem for LocalFs {
     fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
         async move {
             trace!("FS: create_dir {:?}", self.fspath_dbg(path));
-            if self.is_forbidden(path) {
-                return Err(FsError::Forbidden);
-            }
+            // if self.is_forbidden(path) {
+            //     return Err(FsError::Forbidden);
+            // }
             #[cfg(not(target_os = "windows"))]
             let mode = if self.inner.public { 0o755 } else { 0o700 };
             let path = self.fspath(path);
@@ -390,9 +392,9 @@ impl DavFileSystem for LocalFs {
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
         async move {
             trace!("FS: remove_file {:?}", self.fspath_dbg(path));
-            if self.is_forbidden(path) {
-                return Err(FsError::Forbidden);
-            }
+            // if self.is_forbidden(path) {
+            //     return Err(FsError::Forbidden);
+            // }
             let path = self.fspath(path);
             self.blocking(move || std::fs::remove_file(path).map_err(|e| e.into()))
                 .await
@@ -403,9 +405,9 @@ impl DavFileSystem for LocalFs {
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
         async move {
             trace!("FS: rename {:?} {:?}", self.fspath_dbg(from), self.fspath_dbg(to));
-            if self.is_forbidden(from) || self.is_forbidden(to) {
-                return Err(FsError::Forbidden);
-            }
+            // if self.is_forbidden(from) || self.is_forbidden(to) {
+            //     return Err(FsError::Forbidden);
+            // }
             let frompath = self.fspath(from);
             let topath = self.fspath(to);
             self.blocking(move || {
@@ -433,9 +435,9 @@ impl DavFileSystem for LocalFs {
     fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
         async move {
             trace!("FS: copy {:?} {:?}", self.fspath_dbg(from), self.fspath_dbg(to));
-            if self.is_forbidden(from) || self.is_forbidden(to) {
-                return Err(FsError::Forbidden);
-            }
+            // if self.is_forbidden(from) || self.is_forbidden(to) {
+            //     return Err(FsError::Forbidden);
+            // }
             let path_from = self.fspath(from);
             let path_to = self.fspath(to);
 
@@ -464,7 +466,7 @@ struct ReadDirBatch {
 
 // Read the next batch of LocalFsDirEntry structs (up to 256).
 // This is sync code, must be run in `blocking()`.
-fn read_batch(iterator: Option<std::fs::ReadDir>, fs: LocalFs, do_meta: ReadDirMeta) -> ReadDirBatch {
+fn read_batch(iterator: Option<std::fs::ReadDir>, fs: LocalFsEx, do_meta: ReadDirMeta) -> ReadDirBatch {
     let mut buffer = VecDeque::new();
     let mut iterator = match iterator {
         Some(i) => i,
@@ -811,59 +813,59 @@ impl DavMetaData for LocalFsMetaData {
     }
 }
 
-impl From<&io::Error> for FsError {
-    fn from(e: &io::Error) -> Self {
-        if let Some(errno) = e.raw_os_error() {
-            // specific errors.
-            #[cfg(not(target_os = "windows"))]
-            match errno {
-                libc::EMLINK | libc::ENOSPC | libc::EDQUOT => return FsError::InsufficientStorage,
-                libc::EFBIG => return FsError::TooLarge,
-                libc::EACCES | libc::EPERM => return FsError::Forbidden,
-                libc::ENOTEMPTY | libc::EEXIST => return FsError::Exists,
-                libc::ELOOP => return FsError::LoopDetected,
-                libc::ENAMETOOLONG => return FsError::PathTooLong,
-                libc::ENOTDIR => return FsError::Forbidden,
-                libc::EISDIR => return FsError::Forbidden,
-                libc::EROFS => return FsError::Forbidden,
-                libc::ENOENT => return FsError::NotFound,
-                libc::ENOSYS => return FsError::NotImplemented,
-                libc::EXDEV => return FsError::IsRemote,
-                _ => {},
-            }
-            #[cfg(target_os = "windows")]
-            match errno {
-                // libc::EMLINK | libc::ENOSPC | libc::EDQUOT => return FsError::InsufficientStorage,
-                libc::EMLINK | libc::ENOSPC => return FsError::InsufficientStorage,
-                libc::EFBIG => return FsError::TooLarge,
-                libc::EACCES | libc::EPERM => return FsError::Forbidden,
-                libc::ENOTEMPTY | libc::EEXIST => return FsError::Exists,
-                libc::ELOOP => return FsError::LoopDetected,
-                libc::ENAMETOOLONG => return FsError::PathTooLong,
-                libc::ENOTDIR => return FsError::Forbidden,
-                libc::EISDIR => return FsError::Forbidden,
-                libc::EROFS => return FsError::Forbidden,
-                libc::ENOENT => return FsError::NotFound,
-                libc::ENOSYS => return FsError::NotImplemented,
-                libc::EXDEV => return FsError::IsRemote,
-                _ => {},
-            }
-        } else {
-            // not an OS error - must be "not implemented"
-            // (e.g. metadata().created() on systems without st_crtime)
-            return FsError::NotImplemented;
-        }
-        // generic mappings for-whatever is left.
-        match e.kind() {
-            ErrorKind::NotFound => FsError::NotFound,
-            ErrorKind::PermissionDenied => FsError::Forbidden,
-            _ => FsError::GeneralFailure,
-        }
-    }
-}
+// impl From<&io::Error> for FsError {
+//     fn from(e: &io::Error) -> Self {
+//         if let Some(errno) = e.raw_os_error() {
+//             // specific errors.
+//             #[cfg(not(target_os = "windows"))]
+//             match errno {
+//                 libc::EMLINK | libc::ENOSPC | libc::EDQUOT => return FsError::InsufficientStorage,
+//                 libc::EFBIG => return FsError::TooLarge,
+//                 libc::EACCES | libc::EPERM => return FsError::Forbidden,
+//                 libc::ENOTEMPTY | libc::EEXIST => return FsError::Exists,
+//                 libc::ELOOP => return FsError::LoopDetected,
+//                 libc::ENAMETOOLONG => return FsError::PathTooLong,
+//                 libc::ENOTDIR => return FsError::Forbidden,
+//                 libc::EISDIR => return FsError::Forbidden,
+//                 libc::EROFS => return FsError::Forbidden,
+//                 libc::ENOENT => return FsError::NotFound,
+//                 libc::ENOSYS => return FsError::NotImplemented,
+//                 libc::EXDEV => return FsError::IsRemote,
+//                 _ => {},
+//             }
+//             #[cfg(target_os = "windows")]
+//             match errno {
+//                 // libc::EMLINK | libc::ENOSPC | libc::EDQUOT => return FsError::InsufficientStorage,
+//                 libc::EMLINK | libc::ENOSPC => return FsError::InsufficientStorage,
+//                 libc::EFBIG => return FsError::TooLarge,
+//                 libc::EACCES | libc::EPERM => return FsError::Forbidden,
+//                 libc::ENOTEMPTY | libc::EEXIST => return FsError::Exists,
+//                 libc::ELOOP => return FsError::LoopDetected,
+//                 libc::ENAMETOOLONG => return FsError::PathTooLong,
+//                 libc::ENOTDIR => return FsError::Forbidden,
+//                 libc::EISDIR => return FsError::Forbidden,
+//                 libc::EROFS => return FsError::Forbidden,
+//                 libc::ENOENT => return FsError::NotFound,
+//                 libc::ENOSYS => return FsError::NotImplemented,
+//                 libc::EXDEV => return FsError::IsRemote,
+//                 _ => {},
+//             }
+//         } else {
+//             // not an OS error - must be "not implemented"
+//             // (e.g. metadata().created() on systems without st_crtime)
+//             return FsError::NotImplemented;
+//         }
+//         // generic mappings for-whatever is left.
+//         match e.kind() {
+//             ErrorKind::NotFound => FsError::NotFound,
+//             ErrorKind::PermissionDenied => FsError::Forbidden,
+//             _ => FsError::GeneralFailure,
+//         }
+//     }
+// }
 
-impl From<io::Error> for FsError {
-    fn from(e: io::Error) -> Self {
-        (&e).into()
-    }
-}
+// impl From<io::Error> for FsError {
+//     fn from(e: io::Error) -> Self {
+//         (&e).into()
+//     }
+// }
