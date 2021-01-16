@@ -87,6 +87,18 @@ where
 #[derive(Debug, Clone)]
 struct LocalFsMetaData(std::fs::Metadata);
 
+#[derive(Clone)]
+struct LocalFsMetaDataEx(WIN32_FILE_ATTRIBUTE_DATA);
+
+impl std::fmt::Debug for LocalFsMetaDataEx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("")
+         .field("dwFileAttributes", &self.0.dwFileAttributes)
+         .field("ftCreationTime", &self.0.ftCreationTime)
+         .finish()
+    }
+}
+
 /// Local Filesystem implementation.
 #[derive(Clone)]
 pub struct LocalFsEx {
@@ -236,6 +248,89 @@ impl LocalFsEx {
 
 // This implementation is basically a bunch of boilerplate to
 // wrap the std::fs call in self.blocking() calls.
+
+use winapi::um::fileapi::*;
+use winapi::um::minwinbase::*;
+use winapi::shared::minwindef::LPVOID;
+use winapi::um::winnt::*;
+use winapi::um::handleapi::*;
+use winapi::shared::winerror::*;
+use winapi::um::errhandlingapi::*;
+use winapi::um::winbase::*;
+//use winapi::shared::ntdef::*;
+
+fn get_metadata(path : &Path, dwFlagsAndAttributes: u32) -> Result<WIN32_FILE_ATTRIBUTE_DATA, u32> {
+    let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+    path.push(0);
+
+    let mut fi : WIN32_FILE_ATTRIBUTE_DATA = Default::default();
+    unsafe {
+        let r = GetFileAttributesExW(path.as_ptr(), GetFileExInfoStandard, &mut fi as *mut WIN32_FILE_ATTRIBUTE_DATA as LPVOID);
+        if r != 0 && (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
+            Ok(fi)
+        } else if winapi::um::errhandlingapi::GetLastError() == ERROR_SHARING_VIOLATION {
+            let mut fd : WIN32_FIND_DATAW = Default::default();
+            let r = FindFirstFileW(path.as_ptr(), &mut fd );
+            if r != INVALID_HANDLE_VALUE {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                && fd.dwReserved0 != IO_REPARSE_TAG_SYMLINK 
+                && fd.dwReserved0 != IO_REPARSE_TAG_MOUNT_POINT {
+                    fd.dwFileAttributes &= !FILE_ATTRIBUTE_REPARSE_POINT;
+                }
+                fi.dwFileAttributes = fd.dwFileAttributes;
+                fi.ftCreationTime = fd.ftCreationTime;
+                fi.ftLastAccessTime = fd.ftLastAccessTime;
+                fi.ftLastWriteTime = fd.ftLastWriteTime;
+                fi.nFileSizeHigh = fd.nFileSizeHigh;
+                fi.nFileSizeLow = fd.nFileSizeLow;
+                FindClose(r);
+                Ok(fi)
+            }
+            else {
+                Err(GetLastError())
+            }
+        } else {
+            let mut fileInformation : BY_HANDLE_FILE_INFORMATION = Default::default();
+            let mut ti : FILE_ATTRIBUTE_TAG_INFO = Default::default();
+      
+            let h = CreateFileW(path.as_ptr(), 0, 0, 0 as LPSECURITY_ATTRIBUTES, OPEN_EXISTING, dwFlagsAndAttributes, 0 as LPVOID);
+            if h != INVALID_HANDLE_VALUE {
+                let result = GetFileInformationByHandle(h, &mut fileInformation);
+                if result != 0 {
+                    let mut result = GetFileInformationByHandleEx(h, FileAttributeTagInfo, &mut ti as *mut FILE_ATTRIBUTE_TAG_INFO as LPVOID, std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32);
+                    let error = GetLastError();
+                    if result != 0 && error == ERROR_INVALID_PARAMETER {
+                        ti.ReparseTag = 0;
+                        result = 1;
+                    }
+                    CloseHandle(h);
+                    if result != 0 {
+                        if (fileInformation.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                        && ti.ReparseTag != IO_REPARSE_TAG_SYMLINK 
+                        && ti.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT {
+                            fileInformation.dwFileAttributes &= !FILE_ATTRIBUTE_REPARSE_POINT;
+                        }
+                        fi.dwFileAttributes = fileInformation.dwFileAttributes;
+                        fi.ftCreationTime = fileInformation.ftCreationTime;
+                        fi.ftLastAccessTime = fileInformation.ftLastAccessTime;
+                        fi.ftLastWriteTime = fileInformation.ftLastWriteTime;
+                        fi.nFileSizeHigh = fileInformation.nFileSizeHigh;
+                        fi.nFileSizeLow = fileInformation.nFileSizeLow;
+                        Ok(fi)
+                    } else {
+                        Err(error)
+                    }
+                } else {
+                    CloseHandle(h);
+                    Err(GetLastError())
+                }
+            } else {
+                Err(GetLastError())
+            }
+        }
+    }
+}
+
 impl DavFileSystem for LocalFsEx {
 
     fn metadata<'a>(&'a self, davpath: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
@@ -247,13 +342,12 @@ impl DavFileSystem for LocalFsEx {
             // if self.is_notfound(&path) {
             //     return Err(FsError::NotFound);
             // }
-            self.blocking(move || {
-                match std::fs::metadata(path) {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
-                    Err(e) => Err(e.into()),
-                }
-            })
-            .await
+            if let Ok(meta) = get_metadata(&path, FILE_FLAG_BACKUP_SEMANTICS) {
+                Ok(Box::new(LocalFsMetaDataEx(meta)) as Box<dyn DavMetaData>)
+            }
+            else {
+                Err(FsError::NotFound)
+            }
         }
         .boxed()
     }
@@ -267,13 +361,12 @@ impl DavFileSystem for LocalFsEx {
             // if self.is_notfound(&path) {
             //     return Err(FsError::NotFound);
             // }
-            self.blocking(move || {
-                match std::fs::symlink_metadata(path) {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
-                    Err(e) => Err(e.into()),
-                }
-            })
-            .await
+            if let Ok(meta) = get_metadata(&path, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT) {
+                Ok(Box::new(LocalFsMetaDataEx(meta)) as Box<dyn DavMetaData>)
+            }
+            else {
+                Err(FsError::NotFound)
+            }
         }
         .boxed()
     }
@@ -809,6 +902,53 @@ impl DavMetaData for LocalFsMetaData {
             } else {
                 Some(format!("{:x}", t))
             }
+        }
+    }
+}
+
+impl DavMetaData for LocalFsMetaDataEx {
+    fn len(&self) -> u64 {
+        ((self.0.nFileSizeHigh as u64) << 32) + self.0.nFileSizeLow as u64
+    }
+    fn created(&self) -> FsResult<SystemTime> {
+        Ok(UNIX_EPOCH + Duration::from_nanos((((self.0.ftCreationTime.dwHighDateTime as i64) << 32) +
+        self.0.ftCreationTime.dwLowDateTime as i64 - 116444736000000000) as u64))
+    }
+    fn modified(&self) -> FsResult<SystemTime> {
+        Ok(UNIX_EPOCH + Duration::from_nanos((((self.0.ftLastWriteTime.dwHighDateTime as i64) << 32) +
+        self.0.ftLastWriteTime.dwLowDateTime as i64 - 116444736000000000) as u64))
+    }
+    fn accessed(&self) -> FsResult<SystemTime> {
+        Ok(UNIX_EPOCH + Duration::from_nanos((((self.0.ftLastAccessTime.dwHighDateTime as i64) << 32) +
+        self.0.ftLastAccessTime.dwLowDateTime as i64 - 116444736000000000) as u64))
+    }
+
+    fn status_changed(&self) -> FsResult<SystemTime> {
+        Ok(UNIX_EPOCH + Duration::from_nanos((((self.0.ftCreationTime.dwHighDateTime as i64) << 32) +
+        self.0.ftCreationTime.dwLowDateTime as i64 - 116444736000000000) as u64))
+    }
+
+    fn is_dir(&self) -> bool {
+        (self.0.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == FILE_ATTRIBUTE_DIRECTORY
+    }
+    fn is_file(&self) -> bool {
+        (self.0.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0
+    }
+    fn is_symlink(&self) -> bool {
+        (self.0.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    }
+    fn executable(&self) -> FsResult<bool> {
+        panic!();
+    }
+
+    // same as the default apache etag.
+    fn etag(&self) -> Option<String> {
+        let t = (((self.0.ftLastWriteTime.dwHighDateTime as i64) << 32) +
+        self.0.ftLastWriteTime.dwLowDateTime as i64 - 116444736000000000) as u64 / 1000;
+        if self.is_file() {
+            Some(format!("{:x}-{:x}", self.len(), t))
+        } else {
+            Some(format!("{:x}", t))
         }
     }
 }
