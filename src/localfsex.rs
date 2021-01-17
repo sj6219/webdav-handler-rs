@@ -118,27 +118,12 @@ pub(crate) struct LocalFsInner {
 #[derive(Debug)]
 struct LocalFsFile(Option<std::fs::File>);
 
-struct LocalFsReadDir {
-    fs:        LocalFsEx,
-    do_meta:   ReadDirMeta,
-    buffer:    VecDeque<io::Result<LocalFsDirEntry>>,
-    dir_cache: Option<DUCacheBuilder>,
-    iterator:  Option<std::fs::ReadDir>,
-    fut:       Option<BoxFuture<'static, ReadDirBatch>>,
+struct LocalFsReadDirEx {
+    inner: WIN32_FIND_DATAW,
+    handle : isize,
 }
 
-// a DirEntry either already has the metadata available, or a handle
-// to the filesystem so it can call fs.blocking()
-enum Meta {
-    Data(io::Result<std::fs::Metadata>),
-    Fs(LocalFsEx),
-}
-
-// Items from the readdir stream.
-struct LocalFsDirEntry {
-    meta:  Meta,
-    entry: std::fs::DirEntry,
-}
+struct LocalFsDirEntryEx(WIN32_FIND_DATAW);
 
 impl LocalFsEx {
     /// Create a new LocalFsEx DavFileSystem, serving "base".
@@ -290,12 +275,12 @@ fn get_metadata(path : &Path, dwFlagsAndAttributes: u32) -> Result<WIN32_FILE_AT
                 Err(GetLastError())
             }
         } else {
-            let mut fileInformation : BY_HANDLE_FILE_INFORMATION = Default::default();
+            let mut bi : BY_HANDLE_FILE_INFORMATION = Default::default();
             let mut ti : FILE_ATTRIBUTE_TAG_INFO = Default::default();
       
             let h = CreateFileW(path.as_ptr(), 0, 0, 0 as LPSECURITY_ATTRIBUTES, OPEN_EXISTING, dwFlagsAndAttributes, 0 as LPVOID);
             if h != INVALID_HANDLE_VALUE {
-                let result = GetFileInformationByHandle(h, &mut fileInformation);
+                let result = GetFileInformationByHandle(h, &mut bi);
                 if result != 0 {
                     let mut result = GetFileInformationByHandleEx(h, FileAttributeTagInfo, &mut ti as *mut FILE_ATTRIBUTE_TAG_INFO as LPVOID, std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32);
                     let error = GetLastError();
@@ -305,17 +290,17 @@ fn get_metadata(path : &Path, dwFlagsAndAttributes: u32) -> Result<WIN32_FILE_AT
                     }
                     CloseHandle(h);
                     if result != 0 {
-                        if (fileInformation.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                        if (bi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
                         && ti.ReparseTag != IO_REPARSE_TAG_SYMLINK 
                         && ti.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT {
-                            fileInformation.dwFileAttributes &= !FILE_ATTRIBUTE_REPARSE_POINT;
+                            bi.dwFileAttributes &= !FILE_ATTRIBUTE_REPARSE_POINT;
                         }
-                        fi.dwFileAttributes = fileInformation.dwFileAttributes;
-                        fi.ftCreationTime = fileInformation.ftCreationTime;
-                        fi.ftLastAccessTime = fileInformation.ftLastAccessTime;
-                        fi.ftLastWriteTime = fileInformation.ftLastWriteTime;
-                        fi.nFileSizeHigh = fileInformation.nFileSizeHigh;
-                        fi.nFileSizeLow = fileInformation.nFileSizeLow;
+                        fi.dwFileAttributes = bi.dwFileAttributes;
+                        fi.ftCreationTime = bi.ftCreationTime;
+                        fi.ftLastAccessTime = bi.ftLastAccessTime;
+                        fi.ftLastWriteTime = bi.ftLastWriteTime;
+                        fi.nFileSizeHigh = bi.nFileSizeHigh;
+                        fi.nFileSizeLow = bi.nFileSizeLow;
                         Ok(fi)
                     } else {
                         Err(error)
@@ -376,27 +361,41 @@ impl DavFileSystem for LocalFsEx {
     fn read_dir<'a>(
         &'a self,
         davpath: &'a DavPath,
-        meta: ReadDirMeta,
+        _meta: ReadDirMeta,
     ) -> FsFuture<FsStream<Box<dyn DavDirEntry>>>
     {
         async move {
-            trace!("FS: read_dir {:?}", self.fspath_dbg(davpath));
-            let path = self.fspath(davpath);
-            let path2 = path.clone();
-            let iter = self.blocking(move || std::fs::read_dir(&path)).await;
-            match iter {
-                Ok(iterator) => {
-                    let strm = LocalFsReadDir {
-                        fs:        self.clone(),
-                        do_meta:   meta,
-                        buffer:    VecDeque::new(),
-                        dir_cache: None, // self.dir_cache_builder(path2),
-                        iterator:  Some(iterator),
-                        fut:       None,
-                    };
-                    Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
-                },
-                Err(e) => Err(e.into()),
+            unsafe {
+
+                let path = self.fspath(davpath);
+                let mut pattern = path.clone();
+                pattern.push("*");
+                let mut pattern = pattern.as_os_str().encode_wide().collect::<Vec<u16>>();
+                pattern.push(0);
+            
+                let mut fd : WIN32_FIND_DATAW = Default::default();
+                let h =  FindFirstFileW(pattern.as_ptr(), &mut fd);
+                if h == INVALID_HANDLE_VALUE {
+                    let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                    path.push(0);
+                    let error = GetLastError();
+                    let mut fa : WIN32_FILE_ATTRIBUTE_DATA = Default::default();
+                    if error != ERROR_FILE_NOT_FOUND {
+                        return Err(FsError::Forbidden);
+                    }
+                    else if GetFileAttributesExW(path.as_ptr(), GetFileExInfoStandard, &mut fa as *mut WIN32_FILE_ATTRIBUTE_DATA as LPVOID) != 0 {
+                        return Err(FsError::Forbidden);
+                    }
+                    else if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 {
+                        return Err(FsError::Forbidden);
+                    }
+                }
+                let it = LocalFsReadDirEx {
+                    inner : fd,
+                    handle : h as isize,
+                };
+                let strm = futures::stream::iter(it);
+                Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
             }
         }
         .boxed()
@@ -551,202 +550,72 @@ impl DavFileSystem for LocalFsEx {
     }
 }
 
-// read_batch() result.
-struct ReadDirBatch {
-    iterator: Option<std::fs::ReadDir>,
-    buffer:   VecDeque<io::Result<LocalFsDirEntry>>,
-}
-
-// Read the next batch of LocalFsDirEntry structs (up to 256).
-// This is sync code, must be run in `blocking()`.
-fn read_batch(iterator: Option<std::fs::ReadDir>, fs: LocalFsEx, do_meta: ReadDirMeta) -> ReadDirBatch {
-    let mut buffer = VecDeque::new();
-    let mut iterator = match iterator {
-        Some(i) => i,
-        None => {
-            return ReadDirBatch {
-                buffer,
-                iterator: None,
-            }
-        },
-    };
-    let _guard = match do_meta {
-        ReadDirMeta::None => None,
-        _ => fs.inner.fs_access_guard.as_ref().map(|f| f()),
-    };
-    for _ in 0..256 {
-        match iterator.next() {
-            Some(Ok(entry)) => {
-                let meta = match do_meta {
-                    ReadDirMeta::Data => Meta::Data(std::fs::metadata(entry.path())),
-                    ReadDirMeta::DataSymlink => Meta::Data(entry.metadata()),
-                    ReadDirMeta::None => Meta::Fs(fs.clone()),
-                };
-                let d = LocalFsDirEntry {
-                    meta:  meta,
-                    entry: entry,
-                };
-                buffer.push_back(Ok(d))
-            },
-            Some(Err(e)) => {
-                buffer.push_back(Err(e));
-                break;
-            },
-            None => break,
-        }
-    }
-    ReadDirBatch {
-        buffer,
-        iterator: Some(iterator),
-    }
-}
-
-impl LocalFsReadDir {
-    // Create a future that calls read_batch().
-    //
-    // The 'iterator' is moved into the future, and returned when it completes,
-    // together with a list of directory entries.
-    fn read_batch(&mut self) -> BoxFuture<'static, ReadDirBatch> {
-        let iterator = self.iterator.take();
-        let fs = self.fs.clone();
-        let do_meta = self.do_meta;
-
-        let fut: BoxFuture<ReadDirBatch> = blocking(move || read_batch(iterator, fs, do_meta)).boxed();
-        fut
-    }
-}
-
 // The stream implementation tries to be smart and batch I/O operations
-impl<'a> Stream for LocalFsReadDir {
+
+impl Iterator for LocalFsReadDirEx {
     type Item = Box<dyn DavDirEntry>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = Pin::into_inner(self);
-
-        // If the buffer is empty, fill it.
-        if this.buffer.len() == 0 {
-            // If we have no pending future, create one.
-            if this.fut.is_none() {
-                if this.iterator.is_none() {
-                    return Poll::Ready(None);
-                }
-                this.fut = Some(this.read_batch());
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            if self.handle as HANDLE == INVALID_HANDLE_VALUE {
+                return None;
             }
-
-            // Poll the future.
-            let fut = this.fut.as_mut().unwrap();
-            pin_mut!(fut);
-            match Pin::new(&mut fut).poll(cx) {
-                Poll::Ready(batch) => {
-                    this.fut.take();
-                    if let Some(ref mut nb) = this.dir_cache {
-                        for e in &batch.buffer {
-                            if let Ok(ref e) = e {
-                                nb.add(e.entry.file_name());
-                            }
-                        }
-                    }
-                    this.buffer = batch.buffer;
-                    this.iterator = batch.iterator;
-                },
-                Poll::Pending => return Poll::Pending,
+            let entry = Box::new(LocalFsDirEntryEx(self.inner));
+            if FindNextFileW(self.handle as HANDLE, &mut self.inner) == 0 {
+                FindClose(self.handle as HANDLE);
+                self.handle = INVALID_HANDLE_VALUE as isize;
             }
-        }
-
-        // we filled the buffer, now pop from the buffer.
-        match this.buffer.pop_front() {
-            Some(Ok(item)) => Poll::Ready(Some(Box::new(item))),
-            Some(Err(_)) | None => {
-                // fuse the iterator.
-                this.iterator.take();
-                // finish the cache.
-                if let Some(ref mut nb) = this.dir_cache {
-                    nb.finish();
-                }
-                // return end-of-stream.
-                Poll::Ready(None)
-            },
+            Some(entry)
         }
     }
 }
 
-enum Is {
-    File,
-    Dir,
-    Symlink,
-}
-
-impl LocalFsDirEntry {
-    async fn is_a(&self, is: Is) -> FsResult<bool> {
-        match self.meta {
-            Meta::Data(Ok(ref meta)) => {
-                Ok(match is {
-                    Is::File => meta.file_type().is_file(),
-                    Is::Dir => meta.file_type().is_dir(),
-                    Is::Symlink => meta.file_type().is_symlink(),
-                })
-            },
-            Meta::Data(Err(ref e)) => Err(e.into()),
-            Meta::Fs(ref fs) => {
-                let fullpath = self.entry.path();
-                let ft = fs
-                    .blocking(move || std::fs::metadata(&fullpath))
-                    .await?
-                    .file_type();
-                Ok(match is {
-                    Is::File => ft.is_file(),
-                    Is::Dir => ft.is_dir(),
-                    Is::Symlink => ft.is_symlink(),
-                })
-            },
-        }
-    }
-}
-
-impl DavDirEntry for LocalFsDirEntry {
+impl DavDirEntry for LocalFsDirEntryEx {
     fn metadata<'a>(&'a self) -> FsFuture<Box<dyn DavMetaData>> {
-        match self.meta {
-            Meta::Data(ref meta) => {
-                let m = match meta {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta.clone())) as Box<dyn DavMetaData>),
-                    Err(e) => Err(e.into()),
-                };
-                Box::pin(future::ready(m))
-            },
-            Meta::Fs(ref fs) => {
-                let fullpath = self.entry.path();
-                fs.blocking(move || {
-                    match std::fs::metadata(&fullpath) {
-                        Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
-                        Err(e) => Err(e.into()),
-                    }
-                })
-                .boxed()
-            },
+        async move {
+            let mut fa = WIN32_FILE_ATTRIBUTE_DATA {
+                dwFileAttributes: self.0.dwFileAttributes,
+                ftCreationTime: self.0.ftCreationTime,
+                ftLastAccessTime: self.0.ftLastAccessTime,
+                ftLastWriteTime: self.0.ftLastWriteTime,
+                nFileSizeHigh: self.0.nFileSizeHigh,
+                nFileSizeLow: self.0.nFileSizeLow,
+            };
+            if (fa.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+            && self.0.dwReserved0 != IO_REPARSE_TAG_SYMLINK 
+            && self.0.dwReserved0 != IO_REPARSE_TAG_MOUNT_POINT {
+                fa.dwFileAttributes &= !FILE_ATTRIBUTE_REPARSE_POINT;
+            }
+            Ok(Box::new(LocalFsMetaDataEx(fa)) as Box<dyn DavMetaData>)
         }
+        .boxed()
     }
 
     fn name(&self) -> Vec<u8> {
-        #[cfg(not(target_os = "windows"))]
-        {
-            self.entry.file_name().as_bytes().to_vec()
-        }
-        #[cfg(target_os = "windows")]
-        {
-            self.entry.file_name().to_str().unwrap().as_bytes().to_vec()
-        }
+        String::from_utf16(&self.0.cFileName).unwrap().as_bytes().to_vec()
     }
 
     fn is_dir<'a>(&'a self) -> FsFuture<bool> {
-        Box::pin(self.is_a(Is::Dir))
+        let dir = (self.0.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        let sym = (self.0.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        && (self.0.dwReserved0 == IO_REPARSE_TAG_SYMLINK 
+        || self.0.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+        Box::pin(future::ready(Ok(dir && !sym)))
     }
 
     fn is_file<'a>(&'a self) -> FsFuture<bool> {
-        Box::pin(self.is_a(Is::File))
+        let dir = (self.0.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        let sym = (self.0.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        && (self.0.dwReserved0 == IO_REPARSE_TAG_SYMLINK 
+        || self.0.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+        Box::pin(future::ready(Ok(!dir && !sym)))
     }
 
     fn is_symlink<'a>(&'a self) -> FsFuture<bool> {
-        Box::pin(self.is_a(Is::Symlink))
+        let sym = (self.0.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        && (self.0.dwReserved0 == IO_REPARSE_TAG_SYMLINK 
+        || self.0.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+        Box::pin(future::ready(Ok(sym)))
     }
 }
 
