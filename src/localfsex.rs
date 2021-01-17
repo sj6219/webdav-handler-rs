@@ -120,7 +120,7 @@ struct LocalFsFile(Option<std::fs::File>);
 
 struct LocalFsReadDirEx {
     inner: WIN32_FIND_DATAW,
-    handle : isize,
+    handle: isize,
 }
 
 struct LocalFsDirEntryEx(WIN32_FIND_DATAW);
@@ -391,8 +391,8 @@ impl DavFileSystem for LocalFsEx {
                     }
                 }
                 let it = LocalFsReadDirEx {
-                    inner : fd,
-                    handle : h as isize,
+                    inner: fd,
+                    handle: h as isize,
                 };
                 let strm = futures::stream::iter(it);
                 Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
@@ -551,6 +551,13 @@ impl DavFileSystem for LocalFsEx {
 }
 
 // The stream implementation tries to be smart and batch I/O operations
+impl Drop for LocalFsReadDirEx {
+    fn drop(&mut self) {
+        unsafe {
+            FindClose(self.handle as HANDLE);
+        }
+    }
+}
 
 impl Iterator for LocalFsReadDirEx {
     type Item = Box<dyn DavDirEntry>;
