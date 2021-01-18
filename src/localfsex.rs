@@ -5,10 +5,10 @@
 //! you need one.
 
 use std::any::Any;
-use std::collections::VecDeque;
-use std::future::Future;
+//use std::collections::VecDeque;
+//use std::future::Future;
 //use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(not(target_os = "windows"))]
 use { 
     std::os::unix::ffi::OsStrExt, 
@@ -19,22 +19,22 @@ use {
 #[cfg(target_os = "windows")]
 use std::os::windows::prelude::*;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
+//use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
+//use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, Bytes, BytesMut};
-use futures::{future, future::BoxFuture, FutureExt, Stream};
-use pin_utils::pin_mut;
+use futures::{future, FutureExt};
+//use pin_utils::pin_mut;
 use tokio::task;
 
 use libc;
 
 use crate::davpath::DavPath;
 use crate::fs::*;
-use crate::localfs_macos::DUCacheBuilder;
+//use crate::localfs_macos::DUCacheBuilder;
 
 const RUNTIME_TYPE_BASIC: u32 = 1;
 const RUNTIME_TYPE_THREADPOOL: u32 = 2;
@@ -84,9 +84,6 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-struct LocalFsMetaData(std::fs::Metadata);
-
 #[derive(Clone)]
 struct LocalFsMetaDataEx(WIN32_FILE_ATTRIBUTE_DATA);
 
@@ -116,7 +113,9 @@ pub(crate) struct LocalFsInner {
 }
 
 #[derive(Debug)]
-struct LocalFsFile(Option<std::fs::File>);
+struct LocalFsFileEx {
+    handle: isize,
+}
 
 struct LocalFsReadDirEx {
     inner: WIN32_FIND_DATAW,
@@ -236,7 +235,7 @@ impl LocalFsEx {
 
 use winapi::um::fileapi::*;
 use winapi::um::minwinbase::*;
-use winapi::shared::minwindef::LPVOID;
+use winapi::shared::minwindef::*;
 use winapi::um::winnt::*;
 use winapi::um::handleapi::*;
 use winapi::shared::winerror::*;
@@ -244,7 +243,7 @@ use winapi::um::errhandlingapi::*;
 use winapi::um::winbase::*;
 //use winapi::shared::ntdef::*;
 
-fn get_metadata(path : &Path, dwFlagsAndAttributes: u32) -> Result<WIN32_FILE_ATTRIBUTE_DATA, u32> {
+fn get_metadata(path : &Path, flag: u32) -> Result<WIN32_FILE_ATTRIBUTE_DATA, u32> {
     let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
     path.push(0);
 
@@ -278,7 +277,7 @@ fn get_metadata(path : &Path, dwFlagsAndAttributes: u32) -> Result<WIN32_FILE_AT
             let mut bi : BY_HANDLE_FILE_INFORMATION = Default::default();
             let mut ti : FILE_ATTRIBUTE_TAG_INFO = Default::default();
       
-            let h = CreateFileW(path.as_ptr(), 0, 0, 0 as LPSECURITY_ATTRIBUTES, OPEN_EXISTING, dwFlagsAndAttributes, 0 as LPVOID);
+            let h = CreateFileW(path.as_ptr(), 0, 0, 0 as LPSECURITY_ATTRIBUTES, OPEN_EXISTING, flag, 0 as LPVOID);
             if h != INVALID_HANDLE_VALUE {
                 let result = GetFileInformationByHandle(h, &mut bi);
                 if result != 0 {
@@ -402,41 +401,45 @@ impl DavFileSystem for LocalFsEx {
     }
 
     fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<Box<dyn DavFile>> {
+//        println!("FS: open {:?} {:?}", self.fspath_dbg(path), options);
         async move {
-            trace!("FS: open {:?}", self.fspath_dbg(path));
-            // if self.is_forbidden(path) {
-            //     return Err(FsError::Forbidden);
-            // }
-            #[cfg(not(target_os = "windows"))]
-            let mode = if self.inner.public { 0o644 } else { 0o600 };
-            let path = self.fspath(path);
-            self.blocking(move || {
-                #[cfg(not(target_os = "windows"))]
-                let res = std::fs::OpenOptions::new()
-                    .read(options.read)
-                    .write(options.write)
-                    .append(options.append)
-                    .truncate(options.truncate)
-                    .create(options.create)
-                    .create_new(options.create_new)
-                    .mode(mode)
-                    .open(path);
-                #[cfg(target_os = "windows")]
-                let res = std::fs::OpenOptions::new()
-                    .read(options.read)
-                    .write(options.write)
-                    .append(options.append)
-                    .truncate(options.truncate)
-                    .create(options.create)
-                    .create_new(options.create_new)
-                    //.mode(mode)
-                    .open(path);
-                match res {
-                    Ok(file) => Ok(Box::new(LocalFsFile(Some(file))) as Box<dyn DavFile>),
-                    Err(e) => Err(e.into()),
+            unsafe {
+                let path = self.fspath(path);
+                let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                path.push(0);
+
+                let mut access : DWORD = 0;
+                if options.read {
+                    access |= GENERIC_READ;
                 }
-            })
-            .await
+                if options.write {
+                    access |= GENERIC_WRITE;
+                }
+                if options.create || options.create_new {
+                    access |= GENERIC_WRITE;
+                }
+                if options.append {
+                    access &= !GENERIC_WRITE;
+                    access |= FILE_APPEND_DATA;
+                }
+                let createmode : DWORD;
+                if options.create_new {
+                    createmode = CREATE_NEW;
+                } else if options.create && options.truncate {
+                    createmode = CREATE_ALWAYS;
+                } else if options.create {
+                    createmode = OPEN_ALWAYS;
+                } else if options.truncate {
+                    createmode = TRUNCATE_EXISTING;
+                } else {
+                    createmode = OPEN_EXISTING;
+                }
+                let h = CreateFileW(path.as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, 0 as LPSECURITY_ATTRIBUTES, createmode, FILE_ATTRIBUTE_NORMAL, 0 as HANDLE);
+                if h == INVALID_HANDLE_VALUE {
+                    return Err(FsError::Forbidden);
+                }
+                Ok(Box::new(LocalFsFileEx { handle: h as isize}) as Box<dyn DavFile>)
+            }
         }
         .boxed()
     }
@@ -626,159 +629,128 @@ impl DavDirEntry for LocalFsDirEntryEx {
     }
 }
 
-impl DavFile for LocalFsFile {
+impl Drop for LocalFsFileEx {
+    fn drop(&mut self) {
+        unsafe {
+            FindClose(self.handle as HANDLE);
+        }
+    }
+}
+
+impl DavFile for LocalFsFileEx {
     fn metadata<'a>(&'a mut self) -> FsFuture<Box<dyn DavMetaData>> {
         async move {
-            let file = self.0.take().unwrap();
-            let (meta, file) = blocking(move || (file.metadata(), file)).await;
-            self.0 = Some(file);
-            Ok(Box::new(LocalFsMetaData(meta?)) as Box<dyn DavMetaData>)
+            unsafe {
+                let mut bi : BY_HANDLE_FILE_INFORMATION = Default::default();
+                let mut ti : FILE_ATTRIBUTE_TAG_INFO = Default::default();
+    
+                let mut result = GetFileInformationByHandle(self.handle as HANDLE, &mut bi);
+                if result != 0 {
+                    result = GetFileInformationByHandleEx(self.handle as HANDLE, FileAttributeTagInfo, &mut ti as *mut FILE_ATTRIBUTE_TAG_INFO as LPVOID, std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32);
+                    if result == 0 {
+                        if GetLastError() == ERROR_INVALID_PARAMETER {
+                            ti.ReparseTag = 0;
+                        } else {
+                            return Err(FsError::Forbidden);
+                        }
+                    }
+                } else {
+                    return Err(FsError::Forbidden);
+                }
+                let mut fa = WIN32_FILE_ATTRIBUTE_DATA {
+                    dwFileAttributes: bi.dwFileAttributes,
+                    ftCreationTime: bi.ftCreationTime,
+                    ftLastAccessTime: bi.ftLastAccessTime,
+                    ftLastWriteTime: bi.ftLastWriteTime,
+                    nFileSizeHigh: bi.nFileSizeHigh,
+                    nFileSizeLow: bi.nFileSizeLow,
+                };
+                if (fa.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                && ti.ReparseTag != IO_REPARSE_TAG_SYMLINK 
+                && ti.ReparseTag != IO_REPARSE_TAG_MOUNT_POINT {
+                    fa.dwFileAttributes &= !FILE_ATTRIBUTE_REPARSE_POINT;
+                }
+                Ok(Box::new(LocalFsMetaDataEx(fa)) as Box<dyn DavMetaData>)
+            }
         }
         .boxed()
     }
 
     fn write_bytes<'a>(&'a mut self, buf: Bytes) -> FsFuture<()> {
         async move {
-            let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || (file.write_all(&buf), file)).await;
-            self.0 = Some(file);
-            res.map_err(|e| e.into())
+            unsafe {
+                let mut total : usize = 0;
+                while total < buf.len() {
+                    let mut written : DWORD = 0;
+                    let r = WriteFile(self.handle as HANDLE, (buf.as_ptr().add(total)) as LPCVOID, (buf.len() - total) as DWORD, &mut written, 0 as LPOVERLAPPED);
+                    if r == 0 {
+                        return Err(FsError::Forbidden);
+                    }
+                    total += written as usize;
+                }
+                Ok(())
+            }
         }
         .boxed()
     }
 
     fn write_buf<'a>(&'a mut self, mut buf: Box<dyn Buf + Send>) -> FsFuture<()> {
         async move {
-            let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || {
+            unsafe {
                 while buf.remaining() > 0 {
-                    let n = match file.write(buf.bytes()) {
-                        Ok(n) => n,
-                        Err(e) => return (Err(e), file),
-                    };
-                    buf.advance(n);
+                    let mut written : DWORD = 0;
+                    let r = WriteFile(self.handle as HANDLE, buf.bytes().as_ptr() as LPCVOID, buf.bytes().len() as DWORD, &mut written, 0 as LPOVERLAPPED);
+                    if r == 0 {
+                        return Err(FsError::Forbidden);
+                    }
+                    buf.advance(written as usize);
                 }
-                (Ok(()), file)
-            })
-            .await;
-            self.0 = Some(file);
-            res.map_err(|e| e.into())
+                Ok(())
+            }
         }
         .boxed()
     }
 
     fn read_bytes<'a>(&'a mut self, count: usize) -> FsFuture<Bytes> {
         async move {
-            let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || {
+            unsafe {
                 let mut buf = BytesMut::with_capacity(count);
-                let res = unsafe {
-                    buf.set_len(count);
-                    file.read(&mut buf).map(|n| {
-                        buf.set_len(n);
-                        buf.freeze()
-                    })
-                };
-                (res, file)
-            })
-            .await;
-            self.0 = Some(file);
-            res.map_err(|e| e.into())
+                buf.set_len(count);
+                let mut n : DWORD = 0;
+                let r = ReadFile(self.handle as HANDLE, buf.as_mut_ptr() as LPVOID, count as DWORD, &mut n, 0 as LPOVERLAPPED);
+                if r == 0 {
+                    return Err(FsError::Forbidden);
+                }
+                buf.set_len(n as usize);
+                Ok(buf.freeze())
+            }
         }
         .boxed()
     }
 
     fn seek<'a>(&'a mut self, pos: SeekFrom) -> FsFuture<u64> {
         async move {
-            let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || (file.seek(pos), file)).await;
-            self.0 = Some(file);
-            res.map_err(|e| e.into())
+            unsafe {
+                let (m, distance) = match pos {
+                    SeekFrom::Start(offset) => (FILE_BEGIN, offset  as i64),
+                    SeekFrom::Current(offset) => (FILE_CURRENT, offset as i64),
+                    SeekFrom::End(offset) => (FILE_END, offset as i64),
+                };
+                let mut n : LARGE_INTEGER = Default::default();
+                let mut d : LARGE_INTEGER = Default::default();
+                *d.QuadPart_mut() = distance;
+                let r = SetFilePointerEx(self.handle as HANDLE, d, &mut n, m);
+                if r == 0 {
+                    return Err(FsError::Forbidden);
+                }
+                Ok(*n.QuadPart() as u64)
+            }
         }
         .boxed()
     }
 
     fn flush<'a>(&'a mut self) -> FsFuture<()> {
-        async move {
-            let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || (file.flush(), file)).await;
-            self.0 = Some(file);
-            res.map_err(|e| e.into())
-        }
-        .boxed()
-    }
-}
-
-impl DavMetaData for LocalFsMetaData {
-    fn len(&self) -> u64 {
-        self.0.len()
-    }
-    fn created(&self) -> FsResult<SystemTime> {
-        self.0.created().map_err(|e| e.into())
-    }
-    fn modified(&self) -> FsResult<SystemTime> {
-        self.0.modified().map_err(|e| e.into())
-    }
-    fn accessed(&self) -> FsResult<SystemTime> {
-        self.0.accessed().map_err(|e| e.into())
-    }
-
-    fn status_changed(&self) -> FsResult<SystemTime> {
-        #[cfg(not(target_os = "windows"))]
-        {
-            Ok(UNIX_EPOCH + Duration::new(self.0.ctime() as u64, 0))
-        }
-        #[cfg(target_os = "windows")]
-        {
-            Ok(UNIX_EPOCH + Duration::from_nanos(self.0.creation_time() - 116444736000000000))
-        }
-    }
-
-    fn is_dir(&self) -> bool {
-        self.0.is_dir()
-    }
-    fn is_file(&self) -> bool {
-        self.0.is_file()
-    }
-    fn is_symlink(&self) -> bool {
-        self.0.file_type().is_symlink()
-    }
-    fn executable(&self) -> FsResult<bool> {
-        #[cfg(not(target_os = "windows"))]
-        {
-            if self.0.is_file() {
-                return Ok((self.0.permissions().mode() & 0o100) > 0);
-            }
-            Err(FsError::NotImplemented)
-        }
-        #[cfg(target_os = "windows")]
-        panic!();
-    }
-
-    // same as the default apache etag.
-    fn etag(&self) -> Option<String> {
-        #[cfg(not(target_os = "windows"))]
-        {
-            let modified = self.0.modified().ok()?;
-            let t = modified.duration_since(UNIX_EPOCH).ok()?;
-            let t = t.as_secs() * 1000000 + t.subsec_nanos() as u64 / 1000;
-            if self.is_file() {
-                Some(format!("{:x}-{:x}-{:x}", self.0.ino(), self.0.len(), t))
-            } else {
-                Some(format!("{:x}-{:x}", self.0.ino(), t))
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let modified = self.0.modified().ok()?;
-            let t = modified.duration_since(UNIX_EPOCH).ok()?;
-            let t = t.as_secs() * 1000000 + t.subsec_nanos() as u64 / 1000;
-            if self.is_file() {
-                Some(format!("{:x}-{:x}", self.0.len(), t))
-            } else {
-                Some(format!("{:x}", t))
-            }
-        }
+        future::ok(()).boxed()
     }
 }
 
