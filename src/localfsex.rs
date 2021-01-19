@@ -401,7 +401,6 @@ impl DavFileSystem for LocalFsEx {
     }
 
     fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<Box<dyn DavFile>> {
-//        println!("FS: open {:?} {:?}", self.fspath_dbg(path), options);
         async move {
             unsafe {
                 let path = self.fspath(path);
@@ -436,8 +435,10 @@ impl DavFileSystem for LocalFsEx {
                 }
                 let h = CreateFileW(path.as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, 0 as LPSECURITY_ATTRIBUTES, createmode, FILE_ATTRIBUTE_NORMAL, 0 as HANDLE);
                 if h == INVALID_HANDLE_VALUE {
+                    println!("FS: open fail {:?} {:?}", String::from_utf16(&path), options);
                     return Err(FsError::Forbidden);
                 }
+                println!("FS: open {:?} {:?}", String::from_utf16(&path), options);
                 Ok(Box::new(LocalFsFileEx { handle: h as isize}) as Box<dyn DavFile>)
             }
         }
