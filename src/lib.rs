@@ -175,3 +175,23 @@ pub(crate) use crate::fs::*;
 
 pub use crate::davhandler::{DavConfig, DavHandler};
 pub use crate::util::{DavMethod, DavMethodSet};
+
+
+use winapi::um::libloaderapi::*;
+use winapi::shared::minwindef::*;
+use winapi::um::winnt::*;
+
+static mut dll : isize = 0;
+
+pub fn load_lib(name : &str) -> bool {
+    unsafe {
+        dll = LoadLibraryA( name.as_ptr() as LPCSTR) as isize;
+        dll != 0
+    }
+}
+
+pub fn get_proc(name : &str) -> FARPROC {
+    unsafe {
+        GetProcAddress(dll as HMODULE, name.as_ptr() as LPCSTR)
+    }
+}
