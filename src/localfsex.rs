@@ -86,6 +86,20 @@ where
     }
 }
 
+fn get_host(path: &[u16]) -> Vec<u16>
+{
+    let path = &path[2..];
+    let mut i = 0;
+    while i < path.len() {
+        if path[i] == '#' as u16 {
+            break;
+        }
+        i += 1;
+    }
+    let mut v = Vec::from(&path[..i]);
+    v.push(0);
+    v
+}
 
 
 #[derive(Clone)]
@@ -117,16 +131,33 @@ pub(crate) struct LocalFsInner {
 }
 
 #[derive(Debug)]
+struct LocalFsFile {
+    handle: isize,
+}
+
+#[derive(Debug)]
 struct LocalFsFileEx {
+    host: Vec<u16>,
+    handle: isize,
+}
+
+struct LocalFsReadDir {
+    inner: WIN32_FIND_DATAW,
     handle: isize,
 }
 
 struct LocalFsReadDirEx {
     inner: WIN32_FIND_DATAW,
+    host: Vec<u16>,
     handle: isize,
 }
 
 struct LocalFsDirEntryEx(WIN32_FIND_DATAW);
+
+enum PathType {
+    Remote(PathBuf),
+    Local(PathBuf),
+}
 
 impl LocalFsEx {
     /// Create a new LocalFsEx DavFileSystem, serving "base".
@@ -216,6 +247,28 @@ impl LocalFsEx {
             }
             pathbuf
         }
+    }
+
+    fn fspath_ex(&self, path: &DavPath) -> PathType {
+        {
+            let pathbuf = path.as_rel_ospath();
+            {
+                let path = pathbuf.to_str().unwrap();
+                let spath = if let Some(i) = path.find(|c: char| c == '/' || c == '\\') {
+                    &path[..i]
+                } else {
+                    path
+                };
+                if spath.find('#').is_some() {
+                    return PathType::Remote(PathBuf::from(String::from("\\\\") + path));
+                }
+            }
+        }
+        let mut pathbuf = self.inner.basedir.clone();
+        if !self.inner.is_file {
+            pathbuf.push(path.as_rel_ospath());
+        }
+        PathType::Local(pathbuf)
     }
 
     // threadpool::blocking() adapter, also runs the before/after hooks.
@@ -323,18 +376,31 @@ impl DavFileSystem for LocalFsEx {
 
     fn metadata<'a>(&'a self, davpath: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
         async move {
-            // if let Some(meta) = self.is_virtual(davpath) {
-            //     return Ok(meta);
-            // }
-            let path = self.fspath(davpath);
-            // if self.is_notfound(&path) {
-            //     return Err(FsError::NotFound);
-            // }
-            if let Ok(meta) = get_metadata(&path, FILE_FLAG_BACKUP_SEMANTICS) {
-                Ok(Box::new(LocalFsMetaDataEx(meta)) as Box<dyn DavMetaData>)
-            }
-            else {
-                Err(FsError::NotFound)
+            unsafe {
+                match self.fspath_ex(davpath) {
+                    PathType::Remote(path) => {
+                        let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        path.push(0);
+          
+                        let mut fi : WIN32_FILE_ATTRIBUTE_DATA = Default::default();
+                    
+                        let func : extern "stdcall" fn(LPCWSTR, LPWIN32_FILE_ATTRIBUTE_DATA, DWORD)->BOOL = std::mem::transmute(crate::get_proc("GetFileAttributesEx_\0"));
+                        let r = func(path.as_ptr(), &mut fi, FILE_FLAG_BACKUP_SEMANTICS);
+                        if r  != 0 {
+                            Ok(Box::new(LocalFsMetaDataEx(fi)) as Box<dyn DavMetaData>)
+                        } else {
+                            Err(FsError::NotFound)
+                        }
+                    },
+                    PathType::Local(path) => {
+                        if let Ok(meta) = get_metadata(&path, FILE_FLAG_BACKUP_SEMANTICS) {
+                            Ok(Box::new(LocalFsMetaDataEx(meta)) as Box<dyn DavMetaData>)
+                        }
+                        else {
+                            Err(FsError::NotFound)
+                        }
+                    }
+                }
             }
         }
         .boxed()
@@ -342,18 +408,31 @@ impl DavFileSystem for LocalFsEx {
 
     fn symlink_metadata<'a>(&'a self, davpath: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
         async move {
-            // if let Some(meta) = self.is_virtual(davpath) {
-            //     return Ok(meta);
-            // }
-            let path = self.fspath(davpath);
-            // if self.is_notfound(&path) {
-            //     return Err(FsError::NotFound);
-            // }
-            if let Ok(meta) = get_metadata(&path, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT) {
-                Ok(Box::new(LocalFsMetaDataEx(meta)) as Box<dyn DavMetaData>)
-            }
-            else {
-                Err(FsError::NotFound)
+            unsafe {
+                match self.fspath_ex(davpath) {
+                    PathType::Remote(path) => {
+                        let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        path.push(0);
+          
+                        let mut fi : WIN32_FILE_ATTRIBUTE_DATA = Default::default();
+                    
+                        let func : extern "stdcall" fn(LPCWSTR, LPWIN32_FILE_ATTRIBUTE_DATA, DWORD)->BOOL = std::mem::transmute(crate::get_proc("GetFileAttributesEx_\0"));
+                        let r = func(path.as_ptr(), &mut fi, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+                        if r  != 0 {
+                            Ok(Box::new(LocalFsMetaDataEx(fi)) as Box<dyn DavMetaData>)
+                        } else {
+                            Err(FsError::NotFound)
+                        }
+                    },
+                    PathType::Local(path) => {
+                        if let Ok(meta) = get_metadata(&path, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT) {
+                            Ok(Box::new(LocalFsMetaDataEx(meta)) as Box<dyn DavMetaData>)
+                        }
+                        else {
+                            Err(FsError::NotFound)
+                        }
+                    }
+                }
             }
         }
         .boxed()
@@ -369,36 +448,58 @@ impl DavFileSystem for LocalFsEx {
     {
         async move {
             unsafe {
-
-                let path = self.fspath(davpath);
-                let mut pattern = path.clone();
-                pattern.push("*");
-                let mut pattern = pattern.as_os_str().encode_wide().collect::<Vec<u16>>();
-                pattern.push(0);
-            
-                let mut fd : WIN32_FIND_DATAW = Default::default();
-                let h =  FindFirstFileW(pattern.as_ptr(), &mut fd);
-                if h == INVALID_HANDLE_VALUE {
-                    let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
-                    path.push(0);
-                    let error = GetLastError();
-                    let mut fa : WIN32_FILE_ATTRIBUTE_DATA = Default::default();
-                    if error != ERROR_FILE_NOT_FOUND {
-                        return Err(FsError::Forbidden);
-                    }
-                    else if GetFileAttributesExW(path.as_ptr(), GetFileExInfoStandard, &mut fa as *mut WIN32_FILE_ATTRIBUTE_DATA as LPVOID) != 0 {
-                        return Err(FsError::Forbidden);
-                    }
-                    else if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 {
-                        return Err(FsError::Forbidden);
+                match self.fspath_ex(davpath) {
+                    PathType::Remote(path) => {
+                        let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        path.push(0);
+          
+                        let mut fd : WIN32_FIND_DATAW = Default::default();
+                    
+                        let func : extern "stdcall" fn(LPCWSTR, LPWIN32_FIND_DATAW)->BOOL = std::mem::transmute(crate::get_proc("FindFirstFile_\0"));
+                        let r = func(path.as_ptr(), &mut fd);
+                        if r  != 0 {
+                            let it = LocalFsReadDirEx {
+                                inner: fd,
+                                host: get_host(&path),
+                                handle: r as isize,
+                            };
+                            let strm = futures::stream::iter(it);
+                            Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
+                        } else {
+                            Err(FsError::NotFound)
+                        }
+                    },
+                    PathType::Local(path) => {
+                        let mut pattern = path.clone();
+                        pattern.push("*");
+                        let mut pattern = pattern.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        pattern.push(0);
+                    
+                        let mut fd : WIN32_FIND_DATAW = Default::default();
+                        let h =  FindFirstFileW(pattern.as_ptr(), &mut fd);
+                        if h == INVALID_HANDLE_VALUE {
+                            let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                            path.push(0);
+                            let error = GetLastError();
+                            let mut fa : WIN32_FILE_ATTRIBUTE_DATA = Default::default();
+                            if error != ERROR_FILE_NOT_FOUND {
+                                return Err(FsError::Forbidden);
+                            }
+                            else if GetFileAttributesExW(path.as_ptr(), GetFileExInfoStandard, &mut fa as *mut WIN32_FILE_ATTRIBUTE_DATA as LPVOID) != 0 {
+                                return Err(FsError::Forbidden);
+                            }
+                            else if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 {
+                                return Err(FsError::Forbidden);
+                            }
+                        }
+                        let it = LocalFsReadDir {
+                            inner: fd,
+                            handle: h as isize,
+                        };
+                        let strm = futures::stream::iter(it);
+                        Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
                     }
                 }
-                let it = LocalFsReadDirEx {
-                    inner: fd,
-                    handle: h as isize,
-                };
-                let strm = futures::stream::iter(it);
-                Ok(Box::pin(strm) as FsStream<Box<dyn DavDirEntry>>)
             }
         }
         .boxed()
@@ -407,43 +508,62 @@ impl DavFileSystem for LocalFsEx {
     fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<Box<dyn DavFile>> {
         async move {
             unsafe {
-                let path = self.fspath(path);
-                let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
-                path.push(0);
-
                 let mut access : DWORD = 0;
-                if options.read {
+                // O_RDONLY, O_WRONLY, O_RDWR
+                if options.read { // O_RDONLY
                     access |= GENERIC_READ;
                 }
-                if options.write {
+                if options.write {  
                     access |= GENERIC_WRITE;
                 }
+
                 if options.create || options.create_new {
                     access |= GENERIC_WRITE;
                 }
-                if options.append {
+                if options.append { // O_APPEND
                     access &= !GENERIC_WRITE;
                     access |= FILE_APPEND_DATA;
                 }
                 let createmode : DWORD;
                 if options.create_new {
-                    createmode = CREATE_NEW;
+                    createmode = CREATE_NEW; // O_CREAT | O_EXCL
                 } else if options.create && options.truncate {
-                    createmode = CREATE_ALWAYS;
+                    createmode = CREATE_ALWAYS; // O_CREAT | O_TRUNC
                 } else if options.create {
-                    createmode = OPEN_ALWAYS;
+                    createmode = OPEN_ALWAYS; // O_CREAT
                 } else if options.truncate {
-                    createmode = TRUNCATE_EXISTING;
+                    createmode = TRUNCATE_EXISTING; // O_TRUNC
                 } else {
                     createmode = OPEN_EXISTING;
                 }
-                let h = CreateFileW(path.as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, 0 as LPSECURITY_ATTRIBUTES, createmode, FILE_ATTRIBUTE_NORMAL, 0 as HANDLE);
-                if h == INVALID_HANDLE_VALUE {
-                    println!("FS: open fail {:?} {:?}", String::from_utf16(&path), options);
-                    return Err(FsError::Forbidden);
+            
+                match self.fspath_ex(path) {
+                    PathType::Remote(path) => {
+                        let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        path.push(0);
+          
+                        let func : extern "stdcall" fn(LPCWSTR, DWORD, DWORD, DWORD, DWORD)->HANDLE = std::mem::transmute(crate::get_proc("CreateFile_\0"));
+                        let h = func(path.as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, createmode, FILE_ATTRIBUTE_NORMAL);
+                        if h == INVALID_HANDLE_VALUE {
+                            //println!("FS: open fail {:?} {:?}", String::from_utf16(&path), options);
+                            return Err(FsError::Forbidden);
+                        }
+                        //println!("FS: open {:?} {:?}", String::from_utf16(&path), options);
+                        Ok(Box::new(LocalFsFileEx { host: get_host(&path), handle: h as isize}) as Box<dyn DavFile>)
+                    },
+                    PathType::Local(path) => {
+                        let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        path.push(0);
+
+                        let h = CreateFileW(path.as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, 0 as LPSECURITY_ATTRIBUTES, createmode, FILE_ATTRIBUTE_NORMAL, 0 as HANDLE);
+                        if h == INVALID_HANDLE_VALUE {
+                            //println!("FS: open fail {:?} {:?}", String::from_utf16(&path), options);
+                            return Err(FsError::Forbidden);
+                        }
+                        //println!("FS: open {:?} {:?}", String::from_utf16(&path), options);
+                        Ok(Box::new(LocalFsFile { handle: h as isize}) as Box<dyn DavFile>)
+                    }
                 }
-                println!("FS: open {:?} {:?}", String::from_utf16(&path), options);
-                Ok(Box::new(LocalFsFileEx { handle: h as isize}) as Box<dyn DavFile>)
             }
         }
         .boxed()
@@ -558,11 +678,40 @@ impl DavFileSystem for LocalFsEx {
     }
 }
 
-// The stream implementation tries to be smart and batch I/O operations
-impl Drop for LocalFsReadDirEx {
+impl Drop for LocalFsReadDir {
     fn drop(&mut self) {
         unsafe {
             FindClose(self.handle as HANDLE);
+        }
+    }
+}
+
+impl Iterator for LocalFsReadDir {
+    type Item = Box<dyn DavDirEntry>;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            if self.handle as HANDLE == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let entry = Box::new(LocalFsDirEntryEx(self.inner));
+            if FindNextFileW(self.handle as HANDLE, &mut self.inner) == 0 {
+                FindClose(self.handle as HANDLE);
+                self.handle = INVALID_HANDLE_VALUE as isize;
+            }
+            Some(entry)
+        }
+    }
+}
+
+impl Drop for LocalFsReadDirEx {
+    fn drop(&mut self) {
+        unsafe {
+            if self.handle as HANDLE != INVALID_HANDLE_VALUE {
+                let func : extern "stdcall" fn(LPCWSTR, HANDLE)->BOOL = std::mem::transmute(crate::get_proc("FindClose_\0"));
+                func(self.host.as_ptr(), self.handle as HANDLE);
+                self.handle = INVALID_HANDLE_VALUE as isize;                
+            }
         }
     }
 }
@@ -576,8 +725,10 @@ impl Iterator for LocalFsReadDirEx {
                 return None;
             }
             let entry = Box::new(LocalFsDirEntryEx(self.inner));
-            if FindNextFileW(self.handle as HANDLE, &mut self.inner) == 0 {
-                FindClose(self.handle as HANDLE);
+            let func : extern "stdcall" fn(LPCWSTR, HANDLE, LPWIN32_FIND_DATAW)->BOOL = std::mem::transmute(crate::get_proc("FindNextFile_\0"));
+            if func(self.host.as_ptr(), self.handle as HANDLE, &mut self.inner) == 0 {
+                let func : extern "stdcall" fn(LPCWSTR, HANDLE)->BOOL = std::mem::transmute(crate::get_proc("FindClose_\0"));
+                func(self.host.as_ptr(), self.handle as HANDLE);
                 self.handle = INVALID_HANDLE_VALUE as isize;
             }
             Some(entry)
@@ -634,15 +785,15 @@ impl DavDirEntry for LocalFsDirEntryEx {
     }
 }
 
-impl Drop for LocalFsFileEx {
+impl Drop for LocalFsFile {
     fn drop(&mut self) {
         unsafe {
-            FindClose(self.handle as HANDLE);
+            CloseHandle(self.handle as HANDLE);
         }
     }
 }
 
-impl DavFile for LocalFsFileEx {
+impl DavFile for LocalFsFile {
     fn metadata<'a>(&'a mut self) -> FsFuture<Box<dyn DavMetaData>> {
         async move {
             unsafe {
@@ -745,6 +896,93 @@ impl DavFile for LocalFsFileEx {
                 let mut d : LARGE_INTEGER = Default::default();
                 *d.QuadPart_mut() = distance;
                 let r = SetFilePointerEx(self.handle as HANDLE, d, &mut n, m);
+                if r == 0 {
+                    return Err(FsError::Forbidden);
+                }
+                Ok(*n.QuadPart() as u64)
+            }
+        }
+        .boxed()
+    }
+
+    fn flush<'a>(&'a mut self) -> FsFuture<()> {
+        future::ok(()).boxed()
+    }
+}
+
+impl Drop for LocalFsFileEx {
+    fn drop(&mut self) {
+        unsafe {
+            if self.handle as HANDLE != INVALID_HANDLE_VALUE {
+                let func : extern "stdcall" fn(LPCWSTR, HANDLE)->BOOL = std::mem::transmute(crate::get_proc("CloseHandle_\0"));
+                func(self.host.as_ptr(), self.handle as HANDLE);
+                self.handle = INVALID_HANDLE_VALUE as isize;                
+            }
+        }
+    }
+}
+
+impl DavFile for LocalFsFileEx {
+    fn metadata<'a>(&'a mut self) -> FsFuture<Box<dyn DavMetaData>> {
+        async move {
+            unsafe {
+                let mut fa : WIN32_FILE_ATTRIBUTE_DATA = Default::default();
+                let func : extern "stdcall" fn(LPCWSTR, HANDLE, LPWIN32_FILE_ATTRIBUTE_DATA)->BOOL = std::mem::transmute(crate::get_proc("GetFileInformationByHandle_\0"));
+                let result = func(self.host.as_ptr(), self.handle as HANDLE, &mut fa);
+                if result == 0 {
+                    return Err(FsError::Forbidden);
+                }
+                Ok(Box::new(LocalFsMetaDataEx(fa)) as Box<dyn DavMetaData>)
+            }
+        }
+        .boxed()
+    }
+
+    fn write_bytes<'a>(&'a mut self, _buf: Bytes) -> FsFuture<()> {
+        async move {
+            panic!();
+        }
+        .boxed()
+    }
+
+    fn write_buf<'a>(&'a mut self, mut _buf: Box<dyn Buf + Send>) -> FsFuture<()> {
+        async move {
+            panic!();
+        }
+        .boxed()
+    }
+
+    fn read_bytes<'a>(&'a mut self, count: usize) -> FsFuture<Bytes> {
+        async move {
+            unsafe {
+                let mut buf = BytesMut::with_capacity(count);
+                buf.set_len(count);
+                let mut n : DWORD = 0;
+                let func : extern "stdcall" fn(LPCWSTR, HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED)->BOOL = std::mem::transmute(crate::get_proc("ReadFile_\0"));
+                let r = func(self.host.as_ptr(), self.handle as HANDLE, buf.as_mut_ptr() as LPVOID, count as DWORD, &mut n, 0 as LPOVERLAPPED);
+                if r == 0 {
+                    return Err(FsError::Forbidden);
+                }
+                buf.set_len(n as usize);
+                Ok(buf.freeze())
+            }
+        }
+        .boxed()
+    }
+
+    fn seek<'a>(&'a mut self, pos: SeekFrom) -> FsFuture<u64> {
+        async move {
+            unsafe {
+                let (m, distance) = match pos {
+                    SeekFrom::Start(offset) => (FILE_BEGIN, offset  as i64),
+                    SeekFrom::Current(offset) => (FILE_CURRENT, offset as i64),
+                    SeekFrom::End(offset) => (FILE_END, offset as i64),
+                };
+                let mut n : LARGE_INTEGER = Default::default();
+                let mut d : LARGE_INTEGER = Default::default();
+                *d.QuadPart_mut() = distance;
+                let func : extern "stdcall" fn(LPCWSTR, HANDLE, LARGE_INTEGER, PLARGE_INTEGER, DWORD)->BOOL = std::mem::transmute(crate::get_proc("SetFilePointerEx_\0"));
+                let r = func(self.host.as_ptr(), self.handle as HANDLE, d, &mut n, m);
                 if r == 0 {
                     return Err(FsError::Forbidden);
                 }

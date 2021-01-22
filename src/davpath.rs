@@ -378,17 +378,59 @@ impl DavPathRef {
     /// as OS specific Path, relative (remove first slash)
     ///
     /// Used to `push()` onto a pathbuf.
-    pub fn as_rel_ospath(&self) -> &Path {
-        let spath = self.get_path();
-        let mut path = if spath.len() > 0 { &spath[1..] } else { spath };
-        if path.ends_with(b"/") {
-            path = &path[..path.len() - 1];
+    pub fn as_rel_ospath(&self) -> PathBuf {
+        let mut v : Vec<u8> = Vec::<u8>::from(self.get_path());
+        let path : &mut [u8] = v.as_mut_slice();
+
+
+        let mut i = 0;
+        let mut j = 0;
+        if path.len() > 0 {
+            i += 1;
         }
-        #[cfg(not(target_os = "windows"))] 
-        let os_string = OsStr::from_bytes(path);
-        #[cfg(target_os = "windows")] 
-        let os_string : &OsStr = std::str::from_utf8(path).unwrap().as_ref();
-        Path::new(os_string)
+
+        while i < path.len() {
+            if path[i] == b'%' as u8 && i + 2 <= path.len() {
+                let mut ch  = 0;
+                i += 1;
+                if path[i] >= b'0' && path[i+1] <= b'9' {
+                    ch += path[i] - b'0'
+                } else if path[i] >= b'a' && path[i+1] <= b'f' {
+                    ch += path[i] - b'a' + 10
+                } else if path[i] >= b'A' && path[i+1] <= b'F' {
+                    ch += path[i] - b'A' + 10
+                }
+                i += 1;
+                ch = ch << 4;
+                if path[i] >= b'0' && path[i+1] <= b'9' {
+                    ch += path[i] - b'0'
+                } else if path[i] >= b'a' && path[i+1] <= b'f' {
+                    ch += path[i] - b'a' + 10
+                } else if path[i] >= b'A' && path[i+1] <= b'F' {
+                    ch += path[i] - b'A' + 10
+                }
+                i += 1;
+                path[j] = ch;
+                j += 1;
+            } else if path[i] == b'/' {
+                path[j] = b'\\';
+                i += 1;
+                j += 1;
+            } else {
+                path[j] = path[i];
+                i += 1;
+                j += 1;
+            }
+        }
+        if j > 0 && path[j-1] == b'/' && path[j-1] == b'\\' {
+            j -= 1;
+        }
+        v.truncate(j);
+
+        let s = std::str::from_utf8(v.as_slice()).unwrap();
+        let p : PathBuf = PathBuf::from(s);
+        //println!("path {:?}", p);
+        p
     }
 
     // get parent.

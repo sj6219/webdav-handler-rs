@@ -181,17 +181,17 @@ use winapi::um::libloaderapi::*;
 use winapi::shared::minwindef::*;
 use winapi::um::winnt::*;
 
-static mut dll : isize = 0;
+static mut DLL : isize = 0;
 
 pub fn load_lib(name : &str) -> bool {
     unsafe {
-        dll = LoadLibraryA( name.as_ptr() as LPCSTR) as isize;
-        dll != 0
+        DLL = LoadLibraryA( name.as_ptr() as LPCSTR) as isize;
+        DLL != 0
     }
 }
 
 pub fn get_proc(name : &str) -> FARPROC {
     unsafe {
-        GetProcAddress(dll as HMODULE, name.as_ptr() as LPCSTR)
+        GetProcAddress(DLL as HMODULE, name.as_ptr() as LPCSTR)
     }
 }
