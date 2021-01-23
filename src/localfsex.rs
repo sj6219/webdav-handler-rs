@@ -852,7 +852,7 @@ impl DavFile for LocalFsFile {
             unsafe {
                 while buf.remaining() > 0 {
                     let mut written : DWORD = 0;
-                    let r = WriteFile(self.handle as HANDLE, buf.bytes().as_ptr() as LPCVOID, buf.bytes().len() as DWORD, &mut written, 0 as LPOVERLAPPED);
+                    let r = WriteFile(self.handle as HANDLE, buf.chunk().as_ptr() as LPCVOID, buf.chunk().len() as DWORD, &mut written, 0 as LPOVERLAPPED);
                     if r == 0 {
                         return Err(FsError::Forbidden);
                     }
