@@ -137,7 +137,6 @@ struct LocalFsFile {
 
 #[derive(Debug)]
 struct LocalFsFileEx {
-    host: Vec<u16>,
     handle: isize,
 }
 
@@ -148,7 +147,6 @@ struct LocalFsReadDir {
 
 struct LocalFsReadDirEx {
     inner: WIN32_FIND_DATAW,
-    host: Vec<u16>,
     handle: isize,
 }
 
@@ -460,7 +458,6 @@ impl DavFileSystem for LocalFsEx {
                         if r  != 0 {
                             let it = LocalFsReadDirEx {
                                 inner: fd,
-                                host: get_host(&path),
                                 handle: r as isize,
                             };
                             let strm = futures::stream::iter(it);
@@ -549,7 +546,7 @@ impl DavFileSystem for LocalFsEx {
                             return Err(FsError::Forbidden);
                         }
                         //println!("FS: open {:?} {:?}", String::from_utf16(&path), options);
-                        Ok(Box::new(LocalFsFileEx { host: get_host(&path), handle: h as isize}) as Box<dyn DavFile>)
+                        Ok(Box::new(LocalFsFileEx { handle: h as isize}) as Box<dyn DavFile>)
                     },
                     PathType::Local(path) => {
                         let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
@@ -708,8 +705,8 @@ impl Drop for LocalFsReadDirEx {
     fn drop(&mut self) {
         unsafe {
             if self.handle as HANDLE != INVALID_HANDLE_VALUE {
-                let func : extern "stdcall" fn(LPCWSTR, HANDLE)->BOOL = std::mem::transmute(crate::get_proc("FindClose_\0"));
-                func(self.host.as_ptr(), self.handle as HANDLE);
+                let func : extern "stdcall" fn(HANDLE)->BOOL = std::mem::transmute(crate::get_proc("FindClose_\0"));
+                func(self.handle as HANDLE);
                 self.handle = INVALID_HANDLE_VALUE as isize;                
             }
         }
@@ -725,10 +722,10 @@ impl Iterator for LocalFsReadDirEx {
                 return None;
             }
             let entry = Box::new(LocalFsDirEntryEx(self.inner));
-            let func : extern "stdcall" fn(LPCWSTR, HANDLE, LPWIN32_FIND_DATAW)->BOOL = std::mem::transmute(crate::get_proc("FindNextFile_\0"));
-            if func(self.host.as_ptr(), self.handle as HANDLE, &mut self.inner) == 0 {
-                let func : extern "stdcall" fn(LPCWSTR, HANDLE)->BOOL = std::mem::transmute(crate::get_proc("FindClose_\0"));
-                func(self.host.as_ptr(), self.handle as HANDLE);
+            let func : extern "stdcall" fn(HANDLE, LPWIN32_FIND_DATAW)->BOOL = std::mem::transmute(crate::get_proc("FindNextFile_\0"));
+            if func(self.handle as HANDLE, &mut self.inner) == 0 {
+                let func : extern "stdcall" fn(HANDLE)->BOOL = std::mem::transmute(crate::get_proc("FindClose_\0"));
+                func(self.handle as HANDLE);
                 self.handle = INVALID_HANDLE_VALUE as isize;
             }
             Some(entry)
@@ -914,8 +911,8 @@ impl Drop for LocalFsFileEx {
     fn drop(&mut self) {
         unsafe {
             if self.handle as HANDLE != INVALID_HANDLE_VALUE {
-                let func : extern "stdcall" fn(LPCWSTR, HANDLE)->BOOL = std::mem::transmute(crate::get_proc("CloseHandle_\0"));
-                func(self.host.as_ptr(), self.handle as HANDLE);
+                let func : extern "stdcall" fn(HANDLE)->BOOL = std::mem::transmute(crate::get_proc("CloseHandle_\0"));
+                func(self.handle as HANDLE);
                 self.handle = INVALID_HANDLE_VALUE as isize;                
             }
         }
@@ -927,8 +924,8 @@ impl DavFile for LocalFsFileEx {
         async move {
             unsafe {
                 let mut fa : WIN32_FILE_ATTRIBUTE_DATA = Default::default();
-                let func : extern "stdcall" fn(LPCWSTR, HANDLE, LPWIN32_FILE_ATTRIBUTE_DATA)->BOOL = std::mem::transmute(crate::get_proc("GetFileInformationByHandle_\0"));
-                let result = func(self.host.as_ptr(), self.handle as HANDLE, &mut fa);
+                let func : extern "stdcall" fn(HANDLE, LPWIN32_FILE_ATTRIBUTE_DATA)->BOOL = std::mem::transmute(crate::get_proc("GetFileInformationByHandle_\0"));
+                let result = func(self.handle as HANDLE, &mut fa);
                 if result == 0 {
                     return Err(FsError::Forbidden);
                 }
@@ -958,8 +955,8 @@ impl DavFile for LocalFsFileEx {
                 let mut buf = BytesMut::with_capacity(count);
                 buf.set_len(count);
                 let mut n : DWORD = 0;
-                let func : extern "stdcall" fn(LPCWSTR, HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED)->BOOL = std::mem::transmute(crate::get_proc("ReadFile_\0"));
-                let r = func(self.host.as_ptr(), self.handle as HANDLE, buf.as_mut_ptr() as LPVOID, count as DWORD, &mut n, 0 as LPOVERLAPPED);
+                let func : extern "stdcall" fn(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED)->BOOL = std::mem::transmute(crate::get_proc("ReadFile_\0"));
+                let r = func(self.handle as HANDLE, buf.as_mut_ptr() as LPVOID, count as DWORD, &mut n, 0 as LPOVERLAPPED);
                 if r == 0 {
                     return Err(FsError::Forbidden);
                 }
@@ -981,8 +978,8 @@ impl DavFile for LocalFsFileEx {
                 let mut n : LARGE_INTEGER = Default::default();
                 let mut d : LARGE_INTEGER = Default::default();
                 *d.QuadPart_mut() = distance;
-                let func : extern "stdcall" fn(LPCWSTR, HANDLE, LARGE_INTEGER, PLARGE_INTEGER, DWORD)->BOOL = std::mem::transmute(crate::get_proc("SetFilePointerEx_\0"));
-                let r = func(self.host.as_ptr(), self.handle as HANDLE, d, &mut n, m);
+                let func : extern "stdcall" fn(HANDLE, LARGE_INTEGER, PLARGE_INTEGER, DWORD)->BOOL = std::mem::transmute(crate::get_proc("SetFilePointerEx_\0"));
+                let r = func(self.handle as HANDLE, d, &mut n, m);
                 if r == 0 {
                     return Err(FsError::Forbidden);
                 }
