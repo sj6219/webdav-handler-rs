@@ -755,7 +755,12 @@ impl DavDirEntry for LocalFsDirEntryEx {
     }
 
     fn name(&self) -> Vec<u8> {
-        String::from_utf16(&self.0.cFileName).unwrap().as_bytes().to_vec()
+        let name = self.0.cFileName;
+        let mut i = 0;
+        while name[i] != 0 {
+            i += 1;
+        }
+        String::from_utf16(&name[ .. i]).unwrap().as_bytes().to_vec()
     }
 
     fn is_dir<'a>(&'a self) -> FsFuture<bool> {
