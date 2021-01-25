@@ -1005,20 +1005,20 @@ impl DavMetaData for LocalFsMetaDataEx {
     }
     fn created(&self) -> FsResult<SystemTime> {
         Ok(UNIX_EPOCH + Duration::from_nanos((((self.0.ftCreationTime.dwHighDateTime as i64) << 32) +
-        self.0.ftCreationTime.dwLowDateTime as i64 - 116444736000000000) as u64))
+        self.0.ftCreationTime.dwLowDateTime as i64 - 116444736000000000) as u64 * 100))
     }
     fn modified(&self) -> FsResult<SystemTime> {
         Ok(UNIX_EPOCH + Duration::from_nanos((((self.0.ftLastWriteTime.dwHighDateTime as i64) << 32) +
-        self.0.ftLastWriteTime.dwLowDateTime as i64 - 116444736000000000) as u64))
+        self.0.ftLastWriteTime.dwLowDateTime as i64 - 116444736000000000) as u64 * 100))
     }
     fn accessed(&self) -> FsResult<SystemTime> {
         Ok(UNIX_EPOCH + Duration::from_nanos((((self.0.ftLastAccessTime.dwHighDateTime as i64) << 32) +
-        self.0.ftLastAccessTime.dwLowDateTime as i64 - 116444736000000000) as u64))
+        self.0.ftLastAccessTime.dwLowDateTime as i64 - 116444736000000000) as u64 * 100))
     }
 
     fn status_changed(&self) -> FsResult<SystemTime> {
         Ok(UNIX_EPOCH + Duration::from_nanos((((self.0.ftCreationTime.dwHighDateTime as i64) << 32) +
-        self.0.ftCreationTime.dwLowDateTime as i64 - 116444736000000000) as u64))
+        self.0.ftCreationTime.dwLowDateTime as i64 - 116444736000000000) as u64 * 100))
     }
 
     fn is_dir(&self) -> bool {
