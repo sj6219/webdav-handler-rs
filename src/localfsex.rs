@@ -86,22 +86,6 @@ where
     }
 }
 
-fn get_host(path: &[u16]) -> Vec<u16>
-{
-    let path = &path[2..];
-    let mut i = 0;
-    while i < path.len() {
-        if path[i] == '#' as u16 {
-            break;
-        }
-        i += 1;
-    }
-    let mut v = Vec::from(&path[..i]);
-    v.push(0);
-    v
-}
-
-
 #[derive(Clone)]
 struct LocalFsMetaDataEx(WIN32_FILE_ATTRIBUTE_DATA);
 
@@ -621,30 +605,23 @@ impl DavFileSystem for LocalFsEx {
 
     fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
         async move {
-            trace!("FS: rename {:?} {:?}", self.fspath_dbg(from), self.fspath_dbg(to));
-            // if self.is_forbidden(from) || self.is_forbidden(to) {
-            //     return Err(FsError::Forbidden);
-            // }
-            let frompath = self.fspath(from);
-            let topath = self.fspath(to);
-            self.blocking(move || {
-                match std::fs::rename(&frompath, &topath) {
-                    Ok(v) => Ok(v),
-                    Err(e) => {
-                        // webdav allows a rename from a directory to a file.
-                        // note that this check is racy, and I'm not quite sure what
-                        // we should do if the source is a symlink. anyway ...
-                        if e.raw_os_error() == Some(libc::ENOTDIR) && frompath.is_dir() {
-                            // remove and try again.
-                            let _ = std::fs::remove_file(&topath);
-                            std::fs::rename(frompath, topath).map_err(|e| e.into())
+            unsafe {
+                trace!("FS: rename {:?} {:?}", self.fspath_dbg(from), self.fspath_dbg(to));
+                match (self.fspath_ex(from), self.fspath_ex(to)) {
+                    (PathType::Local(frompath), PathType::Local(topath)) => {
+                        let mut frompath = frompath.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        frompath.push(0);
+                        let mut topath = topath.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        topath.push(0);
+                        if MoveFileExW(frompath.as_ptr(), topath.as_ptr(), MOVEFILE_REPLACE_EXISTING) != 0 {
+                            Ok(())
                         } else {
-                            Err(e.into())
+                            Err(FsError::Forbidden)   
                         }
                     },
+                    _ => Err(FsError::Forbidden),
                 }
-            })
-            .await
+            }
         }
         .boxed()
     }
