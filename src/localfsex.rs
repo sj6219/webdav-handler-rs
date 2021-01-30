@@ -281,6 +281,9 @@ use winapi::shared::winerror::*;
 use winapi::um::errhandlingapi::*;
 use winapi::um::winbase::*;
 //use winapi::shared::ntdef::*;
+use winapi::shared::windef::*;
+//use winapi::um::shellapi::*;
+
 
 fn get_metadata(path : &Path, flag: u32) -> Result<WIN32_FILE_ATTRIBUTE_DATA, u32> {
     let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
@@ -437,9 +440,9 @@ impl DavFileSystem for LocalFsEx {
           
                         let mut fd : WIN32_FIND_DATAW = Default::default();
                     
-                        let func : extern "stdcall" fn(LPCWSTR, LPWIN32_FIND_DATAW)->BOOL = std::mem::transmute(crate::get_proc("FindFirstFile_\0"));
+                        let func : extern "stdcall" fn(LPCWSTR, LPWIN32_FIND_DATAW)->HANDLE = std::mem::transmute(crate::get_proc("FindFirstFile_\0"));
                         let r = func(path.as_ptr(), &mut fd);
-                        if r  != 0 {
+                        if r  != INVALID_HANDLE_VALUE || GetLastError() == 0 {
                             let it = LocalFsReadDirEx {
                                 inner: fd,
                                 handle: r as isize,
@@ -552,53 +555,77 @@ impl DavFileSystem for LocalFsEx {
 
     fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
         async move {
-            trace!("FS: create_dir {:?}", self.fspath_dbg(path));
-            // if self.is_forbidden(path) {
-            //     return Err(FsError::Forbidden);
-            // }
-            #[cfg(not(target_os = "windows"))]
-            let mode = if self.inner.public { 0o755 } else { 0o700 };
-            let path = self.fspath(path);
-            self.blocking(move || {
-                #[cfg(not(target_os = "windows"))]
-                {
-                    std::fs::DirBuilder::new()
-                    .mode(mode)
-                    .create(path)
-                    .map_err(|e| e.into()) 
+            unsafe {
+                trace!("FS: create_dir {:?}", self.fspath_dbg(path));
+                match self.fspath_ex(path) {
+                    PathType::Local(path) => {
+                        let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        path.push(0);
+                        if CreateDirectoryW(path.as_ptr(), 0 as LPSECURITY_ATTRIBUTES) != 0 {
+                            Ok(())
+                        } else {
+                            Err(FsError::Forbidden)   
+                        }
+                    },
+                    _ => Err(FsError::Forbidden),
                 }
-                #[cfg(target_os = "windows")]
-                {
-                    std::fs::DirBuilder::new()
-                    //.mode(mode)
-                    .create(path)
-                    .map_err(|e| e.into()) 
-                }
-            })
-            .await
+            }
         }
         .boxed()
     }
 
     fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
         async move {
-            trace!("FS: remove_dir {:?}", self.fspath_dbg(path));
-            let path = self.fspath(path);
-            self.blocking(move || std::fs::remove_dir(path).map_err(|e| e.into()))
-                .await
+            unsafe {
+                trace!("FS: remove_dir {:?}", self.fspath_dbg(path));
+                match self.fspath_ex(path) {
+                    PathType::Local(path) => {
+                        // let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        // path.push(0);
+                        // path.push(0);
+                        
+                        // let mut shfo = SHFILEOPSTRUCTW {
+                        //     hwnd: 0 as HWND,
+                        //     wFunc: FO_DELETE as UINT,
+                        //     pFrom: path.as_ptr(),
+                        //     pTo: 0 as PCZZWSTR,
+                        //     fFlags: FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR,
+                        //     fAnyOperationsAborted: FALSE,
+                        //     hNameMappings: 0 as LPVOID,
+                        //     lpszProgressTitle: 0 as PCWSTR};
+
+                        // if SHFileOperationW(&mut shfo) != 0 {
+                        //     Ok(())
+                        // } else {
+                        //     Err(FsError::Forbidden)   
+                        // }
+                        self.blocking(move || std::fs::remove_dir_all(path).map_err(|e| e.into()))
+                            .await
+                    },
+                    _ => Err(FsError::Forbidden),
+                }
+            }
         }
         .boxed()
     }
 
     fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
         async move {
-            trace!("FS: remove_file {:?}", self.fspath_dbg(path));
-            // if self.is_forbidden(path) {
-            //     return Err(FsError::Forbidden);
-            // }
-            let path = self.fspath(path);
-            self.blocking(move || std::fs::remove_file(path).map_err(|e| e.into()))
-                .await
+            unsafe {
+                trace!("FS: remove_file {:?}", self.fspath_dbg(path));
+                match self.fspath_ex(path) {
+                    PathType::Local(path) => {
+                        let mut path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+                        path.push(0);
+                        if DeleteFileW(path.as_ptr()) != 0 {
+                            Ok(())
+                        } else {
+                            Err(FsError::Forbidden)   
+                        }
+                    },
+                    _ => Err(FsError::Forbidden),
+                }
+            }
         }
         .boxed()
     }
@@ -628,24 +655,25 @@ impl DavFileSystem for LocalFsEx {
 
     fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
         async move {
-            trace!("FS: copy {:?} {:?}", self.fspath_dbg(from), self.fspath_dbg(to));
-            // if self.is_forbidden(from) || self.is_forbidden(to) {
-            //     return Err(FsError::Forbidden);
-            // }
-            let path_from = self.fspath(from);
-            let path_to = self.fspath(to);
-
-            match self.blocking(move || std::fs::copy(path_from, path_to)).await {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    debug!(
-                        "copy({:?}, {:?}) failed: {}",
-                        self.fspath_dbg(from),
-                        self.fspath_dbg(to),
-                        e
-                    );
-                    Err(e.into())
-                },
+            unsafe {
+                trace!("FS: copy {:?} {:?}", self.fspath_dbg(from), self.fspath_dbg(to));
+                match (self.fspath_ex(from), self.fspath_ex(to)) {
+                    (PathType::Local(path_from), PathType::Local(path_to)) => {
+                        match self.blocking(move || std::fs::copy(path_from, path_to)).await {
+                            Ok(_) => Ok(()),
+                            Err(e) => {
+                                debug!(
+                                    "copy({:?}, {:?}) failed: {}",
+                                    self.fspath_dbg(from),
+                                    self.fspath_dbg(to),
+                                    e
+                                );
+                                Err(e.into())
+                            },
+                        }
+                    }
+                    _ => Err(FsError::Forbidden),
+                }
             }
         }
         .boxed()
@@ -665,15 +693,25 @@ impl Iterator for LocalFsReadDir {
     
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
-            if self.handle as HANDLE == INVALID_HANDLE_VALUE {
-                return None;
+            loop {
+                if self.handle as HANDLE == INVALID_HANDLE_VALUE {
+                    return None;
+                }
+                let name = &self.inner.cFileName;
+                if name.starts_with(&[b'.' as u16, 0u16]) || name.starts_with(&[b'.' as u16, b'.' as u16, 0u16]) {
+                    if FindNextFileW(self.handle as HANDLE, &mut self.inner) == 0 {
+                        FindClose(self.handle as HANDLE);
+                        self.handle = INVALID_HANDLE_VALUE as isize;
+                    }
+                    continue;
+                }
+                let entry = Box::new(LocalFsDirEntryEx(self.inner));
+                if FindNextFileW(self.handle as HANDLE, &mut self.inner) == 0 {
+                    FindClose(self.handle as HANDLE);
+                    self.handle = INVALID_HANDLE_VALUE as isize;
+                }
+                return Some(entry);
             }
-            let entry = Box::new(LocalFsDirEntryEx(self.inner));
-            if FindNextFileW(self.handle as HANDLE, &mut self.inner) == 0 {
-                FindClose(self.handle as HANDLE);
-                self.handle = INVALID_HANDLE_VALUE as isize;
-            }
-            Some(entry)
         }
     }
 }
@@ -701,8 +739,6 @@ impl Iterator for LocalFsReadDirEx {
             let entry = Box::new(LocalFsDirEntryEx(self.inner));
             let func : extern "stdcall" fn(HANDLE, LPWIN32_FIND_DATAW)->BOOL = std::mem::transmute(crate::get_proc("FindNextFile_\0"));
             if func(self.handle as HANDLE, &mut self.inner) == 0 {
-                let func : extern "stdcall" fn(HANDLE)->BOOL = std::mem::transmute(crate::get_proc("FindClose_\0"));
-                func(self.handle as HANDLE);
                 self.handle = INVALID_HANDLE_VALUE as isize;
             }
             Some(entry)
