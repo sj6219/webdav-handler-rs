@@ -5,8 +5,8 @@ use std::error::Error;
 #[cfg(not(target_os = "windows"))]
 use {std::ffi::OsStr, std::os::unix::ffi::OsStrExt};
 #[cfg(target_os = "windows")]
-use {std::ffi::OsStr, std::ffi::OsString}; // std::os::windows::prelude::*,
-use std::path::{Path, PathBuf};
+use {std::ffi::OsString}; // std::os::windows::prelude::*,
+use std::path::{PathBuf};
 
 use mime_guess;
 use percent_encoding as pct;

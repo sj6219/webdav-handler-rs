@@ -32,6 +32,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
+#default = ["vnc"]
 actix-compat = [ "actix-web" ]
 warp-compat = [ "warp", "hyper" ]
 all = [ "actix-compat", "warp-compat" ]

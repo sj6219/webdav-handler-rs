@@ -32,8 +32,6 @@ use futures::{future, FutureExt};
 //use pin_utils::pin_mut;
 use tokio::task;
 
-use libc;
-
 use crate::davpath::DavPath;
 use crate::fs::*;
 //use crate::localfs_macos::DUCacheBuilder;
@@ -219,17 +217,17 @@ impl LocalFsEx {
         pathbuf
     }
 
-    fn fspath(&self, path: &DavPath) -> PathBuf {
-        if self.inner.case_insensitive {
-            crate::localfs_windows::resolve(&self.inner.basedir, &path)
-        } else {
-            let mut pathbuf = self.inner.basedir.clone();
-            if !self.inner.is_file {
-                pathbuf.push(path.as_rel_ospath());
-            }
-            pathbuf
-        }
-    }
+    // fn fspath(&self, path: &DavPath) -> PathBuf {
+    //     if self.inner.case_insensitive {
+    //         crate::localfs_windows::resolve(&self.inner.basedir, &path)
+    //     } else {
+    //         let mut pathbuf = self.inner.basedir.clone();
+    //         if !self.inner.is_file {
+    //             pathbuf.push(path.as_rel_ospath());
+    //         }
+    //         pathbuf
+    //     }
+    // }
 
     fn fspath_ex(&self, path: &DavPath) -> PathType {
         {
@@ -281,7 +279,7 @@ use winapi::shared::winerror::*;
 use winapi::um::errhandlingapi::*;
 use winapi::um::winbase::*;
 //use winapi::shared::ntdef::*;
-use winapi::shared::windef::*;
+//use winapi::shared::windef::*;
 //use winapi::um::shellapi::*;
 
 
